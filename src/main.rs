@@ -1,6 +1,6 @@
 use axum::{
     body::Bytes,
-    extract::Path,
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::any,
@@ -48,6 +48,10 @@ struct Cli {
     /// Disable writing logs (overrides config file value)
     #[arg(short = 'n', long = "no-log", global = true)]
     no_log: bool,
+
+    /// Execute shell scripts in the background without waiting for results (overrides config file value)
+    #[arg(short = 'w', long = "no-wait", global = true)]
+    no_wait: bool,
 
     #[command(subcommand)]
     command: Commands,
@@ -105,6 +109,10 @@ fn default_no_log() -> bool {
     false
 }
 
+fn default_no_wait() -> bool {
+    false
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
 struct Config {
     #[serde(default)]
@@ -115,6 +123,8 @@ struct Config {
     port: u16,
     #[serde(default = "default_no_log")]
     no_log: bool,
+    #[serde(default = "default_no_wait")]
+    no_wait: bool,
 }
 
 impl Default for Config {
@@ -124,6 +134,7 @@ impl Default for Config {
             headers: std::collections::HashMap::new(),
             port: default_port(),
             no_log: default_no_log(),
+            no_wait: default_no_wait(),
         }
     }
 }
@@ -361,6 +372,7 @@ fn show_status() {
             if let Ok(pid) = pid_str.parse::<i32>() {
                 let port = parts.get(1).and_then(|p| p.parse::<u16>().ok()).unwrap_or(9090);
                 let no_log = parts.get(2).and_then(|s| s.parse::<bool>().ok()).unwrap_or(false);
+                let no_wait = parts.get(3).and_then(|s| s.parse::<bool>().ok()).unwrap_or(false);
                 if is_process_running(pid) {
                     println!("Status: Running (PID: {})", pid);
                     println!("Listening on port {}", port);
@@ -368,6 +380,11 @@ fn show_status() {
                         println!("Logs: Disabled");
                     } else {
                         println!("Logs: {}", get_log_file_path().display());
+                    }
+                    if no_wait {
+                        println!("No-wait Mode: Enabled");
+                    } else {
+                        println!("No-wait Mode: Disabled");
                     }
                     println!("Tokens storage path: {}", config_path.display());
                     return;
@@ -379,7 +396,7 @@ fn show_status() {
     println!("Tokens storage path: {}", config_path.display());
 }
 
-fn spawn_background_process(no_log: bool, port: u16) -> std::io::Result<()> {
+fn spawn_background_process(no_log: bool, no_wait: bool, port: u16) -> std::io::Result<()> {
     use std::os::unix::process::CommandExt;
     
     let current_exe = std::env::current_exe()?;
@@ -406,6 +423,9 @@ fn spawn_background_process(no_log: bool, port: u16) -> std::io::Result<()> {
     cmd.arg(port.to_string());
     if no_log {
         cmd.arg("--no-log");
+    }
+    if no_wait {
+        cmd.arg("--no-wait");
     }
     
     cmd.stdout(stdout_sink);
@@ -445,7 +465,7 @@ fn spawn_background_process(no_log: bool, port: u16) -> std::io::Result<()> {
     }
     
     let pid_file = get_pid_file_path();
-    let content = format!("{}:{}:{}", pid, port, no_log);
+    let content = format!("{}:{}:{}:{}", pid, port, no_log, no_wait);
     std::fs::write(pid_file, content)?;
     
     println!("Daemon started successfully in background.");
@@ -459,11 +479,11 @@ fn spawn_background_process(no_log: bool, port: u16) -> std::io::Result<()> {
     Ok(())
 }
 
-fn start_daemon(foreground: bool, no_log: bool, port: u16) {
+fn start_daemon(foreground: bool, no_log: bool, no_wait: bool, port: u16) {
     if foreground {
         let current_pid = std::process::id();
         let _ = std::fs::create_dir_all(get_config_dir());
-        let content = format!("{}:{}:{}", current_pid, port, no_log);
+        let content = format!("{}:{}:{}:{}", current_pid, port, no_log, no_wait);
         let _ = std::fs::write(get_pid_file_path(), content);
         
         if !no_log {
@@ -471,7 +491,7 @@ fn start_daemon(foreground: bool, no_log: bool, port: u16) {
         }
         
         let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(run_server(no_log, port));
+        rt.block_on(run_server(no_log, no_wait, port));
     } else {
         // Kill existing daemon if running
         let pid_file = get_pid_file_path();
@@ -504,15 +524,21 @@ fn start_daemon(foreground: bool, no_log: bool, port: u16) {
             let _ = std::fs::remove_file(&pid_file);
         }
         
-        if let Err(e) = spawn_background_process(no_log, port) {
+        if let Err(e) = spawn_background_process(no_log, no_wait, port) {
             eprintln!("Error starting daemon: {}", e);
         }
     }
 }
 
-async fn run_server(no_log: bool, port: u16) {
+#[derive(Clone)]
+struct AppState {
+    no_wait: bool,
+}
+
+async fn run_server(no_log: bool, no_wait: bool, port: u16) {
     let app = Router::new()
-        .route("/webhook/*script_path", any(handle_webhook));
+        .route("/webhook/*script_path", any(handle_webhook))
+        .with_state(AppState { no_wait });
         
     let addr = format!("0.0.0.0:{}", port);
     let listener = match tokio::net::TcpListener::bind(&addr).await {
@@ -535,8 +561,16 @@ async fn run_server(no_log: bool, port: u16) {
     }
 }
 
+#[derive(serde::Deserialize)]
+struct WebhookParams {
+    no_wait: Option<bool>,
+    wait: Option<bool>,
+}
+
 async fn handle_webhook(
     Path(script_path): Path<String>,
+    Query(params): Query<WebhookParams>,
+    State(state): State<AppState>,
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
@@ -618,12 +652,21 @@ async fn handle_webhook(
         }
     };
     
+    // Determine wait behavior
+    let request_no_wait = if let Some(wait) = params.wait {
+        !wait
+    } else if let Some(no_wait) = params.no_wait {
+        no_wait
+    } else {
+        state.no_wait
+    };
+    
     // 3. Execute script using bash
     let mut child = match tokio::process::Command::new("bash")
         .arg(&resolved_path)
         .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdout(if request_no_wait { Stdio::null() } else { Stdio::piped() })
+        .stderr(if request_no_wait { Stdio::null() } else { Stdio::piped() })
         .spawn() {
             Ok(c) => c,
             Err(e) => {
@@ -635,6 +678,22 @@ async fn handle_webhook(
                 ).into_response();
             }
         };
+        
+    if request_no_wait {
+        tokio::spawn(async move {
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(&body).await;
+            }
+            let _ = child.wait().await;
+        });
+        
+        return (
+            StatusCode::OK,
+            axum::Json(serde_json::json!({
+                "message": "Script started in background"
+            }))
+        ).into_response();
+    }
         
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(&body).await;
@@ -673,6 +732,7 @@ fn main() {
     let mut config = load_config();
     let final_port = cli.port.unwrap_or(config.port);
     let final_no_log = cli.no_log || config.no_log;
+    let final_no_wait = cli.no_wait || config.no_wait;
     
     match cli.command {
         Commands::Add { token } => handle_add(token),
@@ -684,14 +744,16 @@ fn main() {
         Commands::Background => {
             config.port = final_port;
             config.no_log = final_no_log;
+            config.no_wait = final_no_wait;
             let _ = save_config(&config);
-            start_daemon(false, final_no_log, final_port);
+            start_daemon(false, final_no_log, final_no_wait, final_port);
         }
         Commands::Start { foreground } => {
             config.port = final_port;
             config.no_log = final_no_log;
+            config.no_wait = final_no_wait;
             let _ = save_config(&config);
-            start_daemon(foreground, final_no_log, final_port);
+            start_daemon(foreground, final_no_log, final_no_wait, final_port);
         }
         Commands::Stop => stop_daemon(),
         Commands::Status => show_status(),
