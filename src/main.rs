@@ -551,7 +551,7 @@ fn main() {
     let cli = Cli::parse();
     
     // Load config first to resolve port and log settings
-    let config = load_config();
+    let mut config = load_config();
     let final_port = cli.port.unwrap_or(config.port);
     let final_no_log = cli.no_log || config.no_log;
     
@@ -559,8 +559,18 @@ fn main() {
         Commands::Add { token } => handle_add(token),
         Commands::List => handle_list(),
         Commands::Delete { token } => handle_delete(token),
-        Commands::Background => start_daemon(false, final_no_log, final_port),
-        Commands::Start { foreground } => start_daemon(foreground, final_no_log, final_port),
+        Commands::Background => {
+            config.port = final_port;
+            config.no_log = final_no_log;
+            let _ = save_config(&config);
+            start_daemon(false, final_no_log, final_port);
+        }
+        Commands::Start { foreground } => {
+            config.port = final_port;
+            config.no_log = final_no_log;
+            let _ = save_config(&config);
+            start_daemon(foreground, final_no_log, final_port);
+        }
         Commands::Stop => stop_daemon(),
         Commands::Status => show_status(),
     }
