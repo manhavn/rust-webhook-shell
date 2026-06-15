@@ -49,11 +49,11 @@ Tokens are saved securely in `~/.config/webhook-daemon/config.json`.
 ### 2. Server Control
 - **Start in Background (Daemon)**:
   ```bash
-  ./webhook background [-n / --no-log]
+  ./webhook [-p <PORT>] background [-n / --no-log]
   ```
 - **Start in Foreground**:
   ```bash
-  ./webhook start --foreground [-n / --no-log]
+  ./webhook [-p <PORT>] start --foreground [-n / --no-log]
   ```
 - **Stop Daemon**:
   ```bash
@@ -68,13 +68,13 @@ Tokens are saved securely in `~/.config/webhook-daemon/config.json`.
 
 ## Webhook API Usage
 
-- **Endpoint**: `POST http://localhost:9090/webhook/{path_to_script.sh}`
+- **Endpoint**: `POST http://localhost:<PORT>/webhook/{path_to_script.sh}` (default port is `9090`)
 - **Required Header**: `Authorization: Bearer <TOKEN>`
 - **Request Body**: Automatically piped to the target script's `stdin`.
 
 ### Example Request (curl)
 
-Assuming you have configured `my-secret-token` and want to execute `/path/to/script.sh`:
+Assuming you have configured `my-secret-token` and want to execute `/path/to/script.sh` on the default port `9090`:
 
 ```bash
 curl -X POST \

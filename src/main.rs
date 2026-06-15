@@ -24,18 +24,22 @@ use tokio::io::AsyncWriteExt;
        - List tokens:     webhook list\n\
        - Delete token:    webhook delete <TOKEN>\n\n\
     2. Launch Webhook Server:\n\
-       - Run in Background:  webhook background [-n / --no-log]\n\
-       - Run in Foreground:  webhook start --foreground [-n / --no-log]\n\n\
+       - Run in Background:  webhook [-p <PORT>] background [-n / --no-log]\n\
+       - Run in Foreground:  webhook [-p <PORT>] start --foreground [-n / --no-log]\n\n\
        * Note: The 'background' command will automatically stop the running daemon (if any) before starting a new one.\n\n\
     3. Stop and Status Check:\n\
        - Check status:       webhook status\n\
        - Stop daemon:        webhook stop\n\n\
     4. Call Webhook:\n\
-       - Endpoint: POST http://localhost:9090/webhook/{path_to_script.sh}\n\
+       - Endpoint: POST http://localhost:<PORT>/webhook/{path_to_script.sh}\n\
        - Required Header: Authorization: Bearer <TOKEN>\n\
        - Request body will be piped into the standard input (stdin) of the shell script."
 )]
 struct Cli {
+    /// Port to listen on [default: 9090]
+    #[arg(short = 'p', long = "port", default_value = "9090", global = true)]
+    port: u16,
+
     /// Disable writing logs
     #[arg(short = 'n', long = "no-log", global = true)]
     no_log: bool,
@@ -169,7 +173,7 @@ fn stop_daemon() {
         return;
     }
     
-    let pid_str = match std::fs::read_to_string(&pid_file) {
+    let content = match std::fs::read_to_string(&pid_file) {
         Ok(s) => s,
         Err(_) => {
             println!("Could not read PID file.");
@@ -177,9 +181,10 @@ fn stop_daemon() {
         }
     };
     
-    let pid = match pid_str.trim().parse::<i32>() {
-        Ok(p) => p,
-        Err(_) => {
+    let parts: Vec<&str> = content.trim().split(':').collect();
+    let pid = match parts.first().and_then(|p| p.parse::<i32>().ok()) {
+        Some(p) => p,
+        None => {
             println!("Invalid PID in PID file.");
             return;
         }
@@ -222,14 +227,18 @@ fn show_status() {
         return;
     }
     
-    if let Ok(pid_str) = std::fs::read_to_string(&pid_file) {
-        if let Ok(pid) = pid_str.trim().parse::<i32>() {
-            if is_process_running(pid) {
-                println!("Status: Running (PID: {})", pid);
-                println!("Listening on port 9090");
-                println!("Logs: {}", get_log_file_path().display());
-                println!("Tokens storage path: {}", config_path.display());
-                return;
+    if let Ok(content) = std::fs::read_to_string(&pid_file) {
+        let parts: Vec<&str> = content.trim().split(':').collect();
+        if let Some(pid_str) = parts.first() {
+            if let Ok(pid) = pid_str.parse::<i32>() {
+                let port = parts.get(1).and_then(|p| p.parse::<u16>().ok()).unwrap_or(9090);
+                if is_process_running(pid) {
+                    println!("Status: Running (PID: {})", pid);
+                    println!("Listening on port {}", port);
+                    println!("Logs: {}", get_log_file_path().display());
+                    println!("Tokens storage path: {}", config_path.display());
+                    return;
+                }
             }
         }
     }
@@ -237,7 +246,7 @@ fn show_status() {
     println!("Tokens storage path: {}", config_path.display());
 }
 
-fn spawn_background_process(no_log: bool) -> std::io::Result<()> {
+fn spawn_background_process(no_log: bool, port: u16) -> std::io::Result<()> {
     use std::os::unix::process::CommandExt;
     
     let current_exe = std::env::current_exe()?;
@@ -260,6 +269,8 @@ fn spawn_background_process(no_log: bool) -> std::io::Result<()> {
     let mut cmd = std::process::Command::new(current_exe);
     cmd.arg("start");
     cmd.arg("--foreground");
+    cmd.arg("--port");
+    cmd.arg(port.to_string());
     if no_log {
         cmd.arg("--no-log");
     }
@@ -301,7 +312,8 @@ fn spawn_background_process(no_log: bool) -> std::io::Result<()> {
     }
     
     let pid_file = get_pid_file_path();
-    std::fs::write(pid_file, pid.to_string())?;
+    let content = format!("{}:{}", pid, port);
+    std::fs::write(pid_file, content)?;
     
     println!("Daemon started successfully in background.");
     println!("PID: {}", pid);
@@ -314,39 +326,43 @@ fn spawn_background_process(no_log: bool) -> std::io::Result<()> {
     Ok(())
 }
 
-fn start_daemon(foreground: bool, no_log: bool) {
+fn start_daemon(foreground: bool, no_log: bool, port: u16) {
     if foreground {
         let current_pid = std::process::id();
         let _ = std::fs::create_dir_all(get_config_dir());
-        let _ = std::fs::write(get_pid_file_path(), current_pid.to_string());
+        let content = format!("{}:{}", current_pid, port);
+        let _ = std::fs::write(get_pid_file_path(), content);
         
         if !no_log {
-            println!("Starting webhook server in foreground on port 9090...");
+            println!("Starting webhook server in foreground on port {}...", port);
         }
         
         let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(run_server(no_log));
+        rt.block_on(run_server(no_log, port));
     } else {
         // Kill existing daemon if running
         let pid_file = get_pid_file_path();
         if pid_file.exists() {
-            if let Ok(pid_str) = std::fs::read_to_string(&pid_file) {
-                if let Ok(pid) = pid_str.trim().parse::<i32>() {
-                    if is_process_running(pid) {
-                        println!("Stopping old daemon with PID {}...", pid);
-                        unsafe {
-                            libc::kill(pid, 15);
-                        }
-                        for _ in 0..30 {
-                            std::thread::sleep(std::time::Duration::from_millis(100));
-                            if !is_process_running(pid) {
-                                break;
-                            }
-                        }
+            if let Ok(content) = std::fs::read_to_string(&pid_file) {
+                let parts: Vec<&str> = content.trim().split(':').collect();
+                if let Some(pid_str) = parts.first() {
+                    if let Ok(pid) = pid_str.parse::<i32>() {
                         if is_process_running(pid) {
-                            println!("Daemon did not exit. Force killing...");
+                            println!("Stopping old daemon with PID {}...", pid);
                             unsafe {
-                                libc::kill(pid, 9);
+                                libc::kill(pid, 15);
+                            }
+                            for _ in 0..30 {
+                                std::thread::sleep(std::time::Duration::from_millis(100));
+                                if !is_process_running(pid) {
+                                    break;
+                                }
+                            }
+                            if is_process_running(pid) {
+                                println!("Daemon did not exit. Force killing...");
+                                  unsafe {
+                                      libc::kill(pid, 9);
+                                  }
                             }
                         }
                     }
@@ -355,28 +371,29 @@ fn start_daemon(foreground: bool, no_log: bool) {
             let _ = std::fs::remove_file(&pid_file);
         }
         
-        if let Err(e) = spawn_background_process(no_log) {
+        if let Err(e) = spawn_background_process(no_log, port) {
             eprintln!("Error starting daemon: {}", e);
         }
     }
 }
 
-async fn run_server(no_log: bool) {
+async fn run_server(no_log: bool, port: u16) {
     let app = Router::new()
         .route("/webhook/*script_path", any(handle_webhook));
         
-    let listener = match tokio::net::TcpListener::bind("0.0.0.0:9090").await {
+    let addr = format!("0.0.0.0:{}", port);
+    let listener = match tokio::net::TcpListener::bind(&addr).await {
         Ok(l) => l,
         Err(e) => {
             if !no_log {
-                eprintln!("Failed to bind to port 9090: {}", e);
+                eprintln!("Failed to bind to port {}: {}", port, e);
             }
             std::process::exit(1);
         }
     };
     
     if !no_log {
-        println!("Listening on http://0.0.0.0:9090");
+        println!("Listening on http://{}", addr);
     }
     if let Err(e) = axum::serve(listener, app).await {
         if !no_log {
@@ -509,8 +526,8 @@ fn main() {
         Commands::Add { token } => handle_add(token),
         Commands::List => handle_list(),
         Commands::Delete { token } => handle_delete(token),
-        Commands::Background => start_daemon(false, cli.no_log),
-        Commands::Start { foreground } => start_daemon(foreground, cli.no_log),
+        Commands::Background => start_daemon(false, cli.no_log, cli.port),
+        Commands::Start { foreground } => start_daemon(foreground, cli.no_log, cli.port),
         Commands::Stop => stop_daemon(),
         Commands::Status => show_status(),
     }
