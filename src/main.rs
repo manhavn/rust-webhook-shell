@@ -255,10 +255,15 @@ fn show_status() {
         if let Some(pid_str) = parts.first() {
             if let Ok(pid) = pid_str.parse::<i32>() {
                 let port = parts.get(1).and_then(|p| p.parse::<u16>().ok()).unwrap_or(9090);
+                let no_log = parts.get(2).and_then(|s| s.parse::<bool>().ok()).unwrap_or(false);
                 if is_process_running(pid) {
                     println!("Status: Running (PID: {})", pid);
                     println!("Listening on port {}", port);
-                    println!("Logs: {}", get_log_file_path().display());
+                    if no_log {
+                        println!("Logs: Disabled");
+                    } else {
+                        println!("Logs: {}", get_log_file_path().display());
+                    }
                     println!("Tokens storage path: {}", config_path.display());
                     return;
                 }
@@ -335,7 +340,7 @@ fn spawn_background_process(no_log: bool, port: u16) -> std::io::Result<()> {
     }
     
     let pid_file = get_pid_file_path();
-    let content = format!("{}:{}", pid, port);
+    let content = format!("{}:{}:{}", pid, port, no_log);
     std::fs::write(pid_file, content)?;
     
     println!("Daemon started successfully in background.");
@@ -353,7 +358,7 @@ fn start_daemon(foreground: bool, no_log: bool, port: u16) {
     if foreground {
         let current_pid = std::process::id();
         let _ = std::fs::create_dir_all(get_config_dir());
-        let content = format!("{}:{}", current_pid, port);
+        let content = format!("{}:{}:{}", current_pid, port, no_log);
         let _ = std::fs::write(get_pid_file_path(), content);
         
         if !no_log {
