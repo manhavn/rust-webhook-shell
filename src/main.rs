@@ -16,23 +16,28 @@ use tokio::io::AsyncWriteExt;
 #[command(author = "Antigravity")]
 #[command(version = "0.1.0")]
 #[command(
-    about = "Rust CLI tool to run shell scripts via Webhook with Bearer token authentication",
+    about = "Rust CLI tool to run shell scripts via Webhook with Bearer token or custom header authentication",
     long_about = "PROGRAM USAGE GUIDE:\n\n\
     * Tokens storage path: ~/.config/webhook-daemon/config.json\n\n\
     1. Authenticated Token Management:\n\
        - Add token:       webhook add <TOKEN>\n\
        - List tokens:     webhook list\n\
        - Delete token:    webhook delete <TOKEN>\n\n\
-    2. Launch Webhook Server:\n\
+    2. Custom Header Management:\n\
+       - Add header:      webhook add-header <HEADER> <TOKEN>\n\
+       - List headers:    webhook list-header\n\
+       - Delete header:   webhook delete-header <HEADER> [TOKEN]\n\n\
+    3. Launch Webhook Server:\n\
        - Run in Background:  webhook [-p <PORT>] background [-n / --no-log]\n\
        - Run in Foreground:  webhook [-p <PORT>] start --foreground [-n / --no-log]\n\n\
        * Note: The 'background' command will automatically stop the running daemon (if any) before starting a new one.\n\n\
-    3. Stop and Status Check:\n\
+    4. Stop and Status Check:\n\
        - Check status:       webhook status\n\
        - Stop daemon:        webhook stop\n\n\
-    4. Call Webhook:\n\
+    5. Call Webhook:\n\
        - Endpoint: POST http://localhost:<PORT>/webhook/{path_to_script.sh}\n\
        - Required Header: Authorization: Bearer <TOKEN>\n\
+         OR custom headers (e.g. X-Gitlab-Token: <TOKEN>, X-My-Header: <TOKEN>)\n\
        - Request body will be piped into the standard input (stdin) of the shell script."
 )]
 struct Cli {
@@ -62,6 +67,22 @@ enum Commands {
         /// The bearer token to delete
         token: String,
     },
+    /// Add a custom header token to the configuration
+    AddHeader {
+        /// The custom header name (e.g. X-My-Header)
+        header: String,
+        /// The token value to add
+        token: String,
+    },
+    /// List all configured custom headers and their tokens
+    ListHeader,
+    /// Delete a custom header token or the entire header from the configuration
+    DeleteHeader {
+        /// The custom header name
+        header: String,
+        /// The token value to delete (if omitted, the entire header and all its tokens will be deleted)
+        token: Option<String>,
+    },
     /// Start the webhook server in the background
     Background,
     /// Start the webhook server (foreground or background)
@@ -88,6 +109,8 @@ fn default_no_log() -> bool {
 struct Config {
     #[serde(default)]
     tokens: Vec<String>,
+    #[serde(default)]
+    headers: std::collections::HashMap<String, Vec<String>>,
     #[serde(default = "default_port")]
     port: u16,
     #[serde(default = "default_no_log")]
@@ -98,6 +121,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             tokens: Vec::new(),
+            headers: std::collections::HashMap::new(),
             port: default_port(),
             no_log: default_no_log(),
         }
@@ -179,6 +203,87 @@ fn handle_delete(token: String) {
         }
     } else {
         println!("Token not found in configuration.");
+    }
+}
+
+fn handle_add_header(header: String, token: String) {
+    let mut config = load_config();
+    let path = get_config_dir().join("config.json");
+    
+    let normalized_header = header.to_lowercase();
+    let tokens = config.headers.entry(normalized_header.clone()).or_insert_with(Vec::new);
+    
+    if tokens.contains(&token) {
+        println!("Token already exists for header '{}'!", header);
+        return;
+    }
+    tokens.push(token);
+    if let Err(e) = save_config(&config) {
+        eprintln!("Error saving config: {}", e);
+    } else {
+        println!("Token added successfully for header '{}'.", header);
+        println!("Tokens storage path: {}", path.display());
+    }
+}
+
+fn handle_list_header() {
+    let config = load_config();
+    let path = get_config_dir().join("config.json");
+    println!("Tokens storage path: {}", path.display());
+    if config.headers.is_empty() {
+        println!("No custom headers configured. Use 'add-header <header> <token>' to add one.");
+        return;
+    }
+    println!("Configured Custom Headers:");
+    let mut sorted_keys: Vec<&String> = config.headers.keys().collect();
+    sorted_keys.sort();
+    
+    for header in sorted_keys {
+        if let Some(tokens) = config.headers.get(header) {
+            println!("  {}:", header);
+            for (i, token) in tokens.iter().enumerate() {
+                println!("    {}. {}", i + 1, token);
+            }
+        }
+    }
+}
+
+fn handle_delete_header(header: String, token: Option<String>) {
+    let mut config = load_config();
+    let path = get_config_dir().join("config.json");
+    let normalized_header = header.to_lowercase();
+    
+    if !config.headers.contains_key(&normalized_header) {
+        println!("Header '{}' not found in configuration.", header);
+        return;
+    }
+    
+    if let Some(tok) = token {
+        let mut remove_header = false;
+        if let Some(tokens) = config.headers.get_mut(&normalized_header) {
+            if let Some(pos) = tokens.iter().position(|t| t == &tok) {
+                tokens.remove(pos);
+                println!("Token deleted successfully from header '{}'.", header);
+                if tokens.is_empty() {
+                    remove_header = true;
+                }
+            } else {
+                println!("Token not found for header '{}' in configuration.", header);
+                return;
+            }
+        }
+        if remove_header {
+            config.headers.remove(&normalized_header);
+        }
+    } else {
+        config.headers.remove(&normalized_header);
+        println!("Header '{}' and all its tokens deleted successfully.", header);
+    }
+    
+    if let Err(e) = save_config(&config) {
+        eprintln!("Error saving config: {}", e);
+    } else {
+        println!("Tokens storage path: {}", path.display());
     }
 }
 
@@ -437,35 +542,49 @@ async fn handle_webhook(
 ) -> impl IntoResponse {
     // 1. Authenticate request
     let config = load_config();
-    if config.tokens.is_empty() {
+    if config.tokens.is_empty() && config.headers.is_empty() {
         return (
             StatusCode::UNAUTHORIZED,
             axum::Json(serde_json::json!({
-                "error": "Unauthorized: No tokens configured on server."
+                "error": "Unauthorized: No tokens or headers configured on server."
             }))
         ).into_response();
     }
     
-    let is_authorized = if let Some(auth_header) = headers.get("Authorization") {
+    let mut is_authorized = false;
+    
+    // Check Authorization header (Bearer token)
+    if let Some(auth_header) = headers.get("Authorization") {
         if let Ok(auth_str) = auth_header.to_str() {
             if auth_str.starts_with("Bearer ") {
                 let request_token = auth_str.trim_start_matches("Bearer ").trim();
-                config.tokens.iter().any(|t| t == request_token)
-            } else {
-                false
+                if config.tokens.iter().any(|t| t == request_token) {
+                    is_authorized = true;
+                }
             }
-        } else {
-            false
         }
-    } else {
-        false
-    };
+    }
+    
+    // Check custom headers
+    if !is_authorized {
+        for (header_name, allowed_tokens) in &config.headers {
+            if let Some(header_val) = headers.get(header_name) {
+                if let Ok(val_str) = header_val.to_str() {
+                    let trimmed_val = val_str.trim();
+                    if allowed_tokens.iter().any(|t| t == trimmed_val) {
+                        is_authorized = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
     
     if !is_authorized {
         return (
             StatusCode::UNAUTHORIZED,
             axum::Json(serde_json::json!({
-                "error": "Unauthorized: Invalid or missing bearer token."
+                "error": "Unauthorized: Invalid or missing token/header."
             }))
         ).into_response();
     }
@@ -559,6 +678,9 @@ fn main() {
         Commands::Add { token } => handle_add(token),
         Commands::List => handle_list(),
         Commands::Delete { token } => handle_delete(token),
+        Commands::AddHeader { header, token } => handle_add_header(header, token),
+        Commands::ListHeader => handle_list_header(),
+        Commands::DeleteHeader { header, token } => handle_delete_header(header, token),
         Commands::Background => {
             config.port = final_port;
             config.no_log = final_no_log;

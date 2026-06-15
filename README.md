@@ -4,8 +4,8 @@ A token-authenticated, background-capable Rust CLI tool to run local shell scrip
 
 ## Features
 
-- **Bearer Token Auth**: Restricts webhook access to configured tokens.
-- **Dynamic Configuration**: Adding or deleting tokens takes effect immediately without restarting the server.
+- **Bearer Token & Custom Header Auth**: Restricts webhook access to configured bearer tokens or custom headers (e.g., `X-Gitlab-Token`, `X-My-Header`).
+- **Dynamic Configuration**: Adding/deleting tokens or custom headers takes effect immediately without restarting the server.
 - **Background Daemon**: Run the server silently as a background process decoupled from the terminal session.
 - **Automatic Lifecycle Control**: Starting a new background server automatically shuts down any existing running instance.
 - **Script Piping**: Webhook request body is piped directly to the target script's standard input (`stdin`).
@@ -46,7 +46,25 @@ Tokens are saved securely in `~/.config/webhook-daemon/config.json`.
   ./webhook delete <your-token>
   ```
 
-### 2. Server Control
+### 2. Custom Header Management
+Configure custom headers to authenticate requests with a raw token (e.g., without the `Bearer` prefix).
+
+- **Add a token for a custom header**:
+  ```bash
+  ./webhook add-header <HEADER> <your-token>
+  ```
+  *Example*: `./webhook add-header X-Gitlab-Token gitlab-secret-abc`
+- **List custom headers**:
+  ```bash
+  ./webhook list-header
+  ```
+- **Delete a custom header or token**:
+  ```bash
+  ./webhook delete-header <HEADER> [your-token]
+  ```
+  *Note*: If `[your-token]` is omitted, the entire header and all its configured tokens will be deleted.
+
+### 3. Server Control
 - **Start in Background (Daemon)**:
   ```bash
   ./webhook [-p <PORT>] background [-n / --no-log]
@@ -64,7 +82,7 @@ Tokens are saved securely in `~/.config/webhook-daemon/config.json`.
   ./webhook status
   ```
 
-### 3. Quick Start Helper Scripts
+### 4. Quick Start Helper Scripts
 For convenience, four quick start runner scripts are provided in the root directory. They all support passing an optional port number as the first argument (e.g. `./run_fg_log.sh 8080`), defaulting to `9090`.
 
 - **Foreground with Logs**: `./run_fg_log.sh [PORT]`
@@ -77,16 +95,25 @@ For convenience, four quick start runner scripts are provided in the root direct
 ## Webhook API Usage
 
 - **Endpoint**: `POST http://localhost:<PORT>/webhook/{path_to_script.sh}` (default port is `9090`)
-- **Required Header**: `Authorization: Bearer <TOKEN>`
+- **Authentication Headers**:
+  - `Authorization: Bearer <TOKEN>` (Standard bearer token)
+  - **OR** custom configured headers (e.g., `X-Gitlab-Token: <TOKEN>`, `X-My-Header: <TOKEN>`). If both `Authorization` and custom headers are sent, or only custom headers are sent, as long as any of the provided and configured headers are correct, the request is authorized. Custom headers do not require the `Bearer ` prefix.
 - **Request Body**: Automatically piped to the target script's `stdin`.
 
-### Example Request (curl)
+### Example Requests (curl)
 
-Assuming you have configured `my-secret-token` and want to execute `/path/to/script.sh` on the default port `9090`:
-
+Using standard Bearer token:
 ```bash
 curl -X POST \
   -H "Authorization: Bearer my-secret-token" \
+  -d "Hello script!" \
+  http://localhost:9090/webhook/path/to/script.sh
+```
+
+Using custom headers (e.g., `X-Gitlab-Token`):
+```bash
+curl -X POST \
+  -H "X-Gitlab-Token: gitlab-secret-abc" \
   -d "Hello script!" \
   http://localhost:9090/webhook/path/to/script.sh
 ```
