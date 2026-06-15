@@ -36,11 +36,11 @@ use tokio::io::AsyncWriteExt;
        - Request body will be piped into the standard input (stdin) of the shell script."
 )]
 struct Cli {
-    /// Port to listen on [default: 9090]
-    #[arg(short = 'p', long = "port", default_value = "9090", global = true)]
-    port: u16,
+    /// Port to listen on (overrides config file value)
+    #[arg(short = 'p', long = "port", global = true)]
+    port: Option<u16>,
 
-    /// Disable writing logs
+    /// Disable writing logs (overrides config file value)
     #[arg(short = 'n', long = "no-log", global = true)]
     no_log: bool,
 
@@ -76,9 +76,32 @@ enum Commands {
     Status,
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Default, Debug)]
+fn default_port() -> u16 {
+    9090
+}
+
+fn default_no_log() -> bool {
+    false
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Debug)]
 struct Config {
+    #[serde(default)]
     tokens: Vec<String>,
+    #[serde(default = "default_port")]
+    port: u16,
+    #[serde(default = "default_no_log")]
+    no_log: bool,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            tokens: Vec::new(),
+            port: default_port(),
+            no_log: default_no_log(),
+        }
+    }
 }
 
 fn get_config_dir() -> PathBuf {
@@ -522,12 +545,17 @@ async fn handle_webhook(
 fn main() {
     let cli = Cli::parse();
     
+    // Load config first to resolve port and log settings
+    let config = load_config();
+    let final_port = cli.port.unwrap_or(config.port);
+    let final_no_log = cli.no_log || config.no_log;
+    
     match cli.command {
         Commands::Add { token } => handle_add(token),
         Commands::List => handle_list(),
         Commands::Delete { token } => handle_delete(token),
-        Commands::Background => start_daemon(false, cli.no_log, cli.port),
-        Commands::Start { foreground } => start_daemon(foreground, cli.no_log, cli.port),
+        Commands::Background => start_daemon(false, final_no_log, final_port),
+        Commands::Start { foreground } => start_daemon(foreground, final_no_log, final_port),
         Commands::Stop => stop_daemon(),
         Commands::Status => show_status(),
     }
