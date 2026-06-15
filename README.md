@@ -64,6 +64,14 @@ Tokens are saved securely in `~/.config/webhook-daemon/config.json`.
   ./webhook status
   ```
 
+### 3. Quick Start Helper Scripts
+For convenience, four quick start runner scripts are provided in the root directory. They all support passing an optional port number as the first argument (e.g. `./run_fg_log.sh 8080`), defaulting to `9090`.
+
+- **Foreground with Logs**: `./run_fg_log.sh [PORT]`
+- **Foreground without Logs**: `./run_fg_nolog.sh [PORT]`
+- **Background with Logs**: `./run_bg_log.sh [PORT]`
+- **Background without Logs**: `./run_bg_nolog.sh [PORT]`
+
 ---
 
 ## Webhook API Usage
