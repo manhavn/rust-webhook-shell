@@ -2,9 +2,21 @@
 cd "$(dirname "$0")"
 cd ..
 
+# ==============================================
+# file này phục vụ mục đích kiểm tra xem có thay đổi nào trên branch deploy-prod so với origin/deploy-prod hay không,
+# nếu có thì sẽ reset về origin/deploy-prod và trigger deploy, nếu không có thì sẽ không làm gì cả.
+# Điều này giúp tránh việc trigger deploy khi không có thay đổi nào mới. Sau khi xong sẽ checkout về main và pull để cập nhật code mới nhất.
+# ==============================================
+# Mục đích để gitlab webhook gọi => tự động build và deploy production.
+# ==============================================
+
 # Exit immediately if a command exits with a non-zero status
 # (If git pull fails, the script will exit and not trigger deployment)
 set -e
+
+git checkout main
+git pull origin main
+git fetch --prune
 
 # Target branch for deployment
 TARGET_BRANCH="deploy-prod"
@@ -45,7 +57,7 @@ if [ "$LOCAL_COMMIT" != "$REMOTE_COMMIT" ]; then
   echo "============================================="
   echo "start deploy"
   echo "============================================="
-  ./prod/node-prod.sh
+  ./prod/deploy-api.sh
 else
   echo "============================================="
   echo "no changes"
@@ -55,5 +67,7 @@ fi
 echo "============================================="
 echo "Deployment finished. Switching back to main..."
 echo "============================================="
-git checkout main
 
+git checkout main
+git pull origin main
+git fetch --prune
